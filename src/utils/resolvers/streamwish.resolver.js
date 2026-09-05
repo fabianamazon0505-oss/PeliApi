@@ -5,6 +5,10 @@ const { URL } = require("url");
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
 
+// =====================================================
+// HELPERS
+// =====================================================
+
 function absoluteUrl(value, base) {
   try {
     return new URL(value, base).href;
@@ -13,38 +17,30 @@ function absoluteUrl(value, base) {
   }
 }
 
-function looksLikeImageOrAd(url) {
+function isSuspiciousUrl(url) {
   try {
     const parsed = new URL(url);
+
     const host = parsed.hostname.toLowerCase();
-    const path = parsed.pathname.toLowerCase();
+    const pathname = parsed.pathname.toLowerCase();
 
-    const badHosts = [
-      "tiktokcdn.com",
-      "tiktokcdn-us.com",
-      "doubleclick.net",
-      "googlesyndication.com",
-    ];
-
+    // Lo vimos aparecer en los logs como imágenes/publicidad
     if (
-      badHosts.some(
-        (domain) =>
-          host === domain ||
-          host.endsWith("." + domain)
-      )
+      host === "tiktokcdn.com" ||
+      host.endsWith(".tiktokcdn.com")
     ) {
       return true;
     }
 
     if (
-      /\.(?:png|jpe?g|webp|gif|svg|avif)(?:$|\?)/i.test(path)
+      pathname.endsWith(".image") ||
+      pathname.includes("/ad-site-")
     ) {
       return true;
     }
 
     if (
-      path.endsWith(".image") ||
-      path.includes("/ad-site-")
+      /\.(png|jpg|jpeg|webp|gif|svg|avif)$/i.test(pathname)
     ) {
       return true;
     }
@@ -55,7 +51,7 @@ function looksLikeImageOrAd(url) {
   }
 }
 
-function isM3u8Text(text) {
+function isM3u8(text) {
   if (typeof text !== "string") {
     return false;
   }
@@ -63,8 +59,9 @@ function isM3u8Text(text) {
   return text.trimStart().startsWith("#EXTM3U");
 }
 
-function getMediaUrls(playlist, playlistUrl) {
-  const result = [];
+function getPlaylistUrls(playlist, playlistUrl) {
+  const urls = [];
+
   const lines = playlist.split(/\r?\n/);
 
   for (const rawLine of lines) {
@@ -73,47 +70,79 @@ function getMediaUrls(playlist, playlistUrl) {
     if (!line) continue;
     if (line.startsWith("#")) continue;
 
-    result.push(
+    urls.push(
       absoluteUrl(line, playlistUrl)
     );
   }
 
-  return result;
+  return urls;
 }
 
-function best(master, base) {
+// =====================================================
+// BUSCAR MEJOR CALIDAD EN MASTER
+// =====================================================
+
+function getBestVariant(master, masterUrl) {
   try {
     const lines = master.split(/\r?\n/);
 
     let bestUrl = null;
-    let bestScore = 0;
+    let bestScore = -1;
 
     for (let i = 0; i < lines.length; i++) {
-      const m =
-        /RESOLUTION=(\d+)x(\d+)/i.exec(lines[i]);
+      const line = lines[i];
 
-      if (!m) continue;
+      if (!line.includes("#EXT-X-STREAM-INF")) {
+        continue;
+      }
 
-      let next = null;
+      const resMatch =
+        /RESOLUTION=(\d+)x(\d+)/i.exec(line);
 
-      for (let j = i + 1; j < lines.length; j++) {
-        const candidate = lines[j].trim();
+      let score = 0;
 
-        if (!candidate) continue;
-        if (candidate.startsWith("#")) continue;
+      if (resMatch) {
+        score =
+          Number(resMatch[1]) *
+          Number(resMatch[2]);
+      }
 
-        next = candidate;
+      let variant = null;
+
+      for (
+        let j = i + 1;
+        j < lines.length;
+        j++
+      ) {
+        const candidate =
+          lines[j].trim();
+
+        if (!candidate) {
+          continue;
+        }
+
+        if (candidate.startsWith("#")) {
+          continue;
+        }
+
+        variant = absoluteUrl(
+          candidate,
+          masterUrl
+        );
+
         break;
       }
 
-      if (!next) continue;
+      if (!variant) {
+        continue;
+      }
 
-      const score =
-        Number(m[1]) * Number(m[2]);
-
-      if (score > bestScore) {
+      if (
+        bestUrl === null ||
+        score > bestScore
+      ) {
+        bestUrl = variant;
         bestScore = score;
-        bestUrl = new URL(next, base).href;
       }
     }
 
@@ -123,18 +152,22 @@ function best(master, base) {
   }
 }
 
+// =====================================================
+// DESCARGAR PLAYLIST
+// =====================================================
+
 async function fetchPlaylist(url, referer) {
   try {
-    const res = await axiosGet(url, {
+    const response = await axiosGet(url, {
       headers: {
         "User-Agent": UA,
         Accept:
-          "application/vnd.apple.mpegurl,application/x-mpegURL,*/*",
+          "application/vnd.apple.mpegurl, application/x-mpegURL, */*",
         Referer: referer || url,
       },
     });
 
-    let data = res.data;
+    let data = response.data;
 
     if (Buffer.isBuffer(data)) {
       data = data.toString("utf8");
@@ -147,144 +180,167 @@ async function fetchPlaylist(url, referer) {
     return data;
   } catch (error) {
     console.warn(
-      `[SW RESOLVER] Error obteniendo playlist ${url}: ${error.message}`
+      `[SW RESOLVER] Error descargando playlist: ${error.message}`
     );
 
     return null;
   }
 }
 
-async function validateMediaPlaylist(
-  playlistUrl,
-  referer
-) {
-  console.log(
-    `[SW RESOLVER] Validando playlist: ${playlistUrl}`
-  );
+// =====================================================
+// VALIDAR PLAYLIST REAL
+// =====================================================
 
-  if (looksLikeImageOrAd(playlistUrl)) {
+async function validatePlaylist(
+  playlistUrl,
+  referer,
+  depth = 0
+) {
+  if (depth > 3) {
     console.warn(
-      `[SW RESOLVER] RECHAZADO URL sospechosa: ${playlistUrl}`
+      "[SW RESOLVER] Demasiados niveles de playlist"
     );
 
     return null;
   }
 
-  const playlist = await fetchPlaylist(
-    playlistUrl,
-    referer
+  console.log(
+    `[SW RESOLVER] Validando: ${playlistUrl}`
   );
+
+  if (isSuspiciousUrl(playlistUrl)) {
+    console.warn(
+      `[SW RESOLVER] URL sospechosa rechazada: ${playlistUrl}`
+    );
+
+    return null;
+  }
+
+  const playlist =
+    await fetchPlaylist(
+      playlistUrl,
+      referer
+    );
 
   if (!playlist) {
     console.warn(
-      "[SW RESOLVER] Playlist vacío/no disponible"
+      "[SW RESOLVER] Playlist no disponible"
     );
 
     return null;
   }
 
-  if (!isM3u8Text(playlist)) {
+  if (!isM3u8(playlist)) {
     console.warn(
-      "[SW RESOLVER] RECHAZADO: la respuesta no comienza con #EXTM3U"
+      "[SW RESOLVER] Respuesta rechazada: no comienza con #EXTM3U"
     );
 
     return null;
   }
 
-  // Si todavía es un master playlist,
-  // elegimos la mejor variante.
-  if (playlist.includes("#EXT-X-STREAM-INF")) {
-    const base = playlistUrl.slice(
-      0,
-      playlistUrl.lastIndexOf("/") + 1
+  // ---------------------------------------------------
+  // MASTER PLAYLIST
+  // ---------------------------------------------------
+
+  if (
+    playlist.includes(
+      "#EXT-X-STREAM-INF"
+    )
+  ) {
+    console.log(
+      "[SW RESOLVER] Detectado MASTER playlist"
     );
 
-    const variant = best(
-      playlist,
-      base
-    );
+    const variant =
+      getBestVariant(
+        playlist,
+        playlistUrl
+      );
 
     if (!variant) {
       console.warn(
-        "[SW RESOLVER] Master sin variante válida"
+        "[SW RESOLVER] No se encontró variante válida"
       );
 
       return null;
     }
 
     console.log(
-      `[SW RESOLVER] Variante seleccionada: ${variant}`
+      `[SW RESOLVER] Mejor variante: ${variant}`
     );
 
-    return await validateMediaPlaylist(
+    return validatePlaylist(
       variant,
-      referer
+      referer,
+      depth + 1
     );
   }
 
-  const mediaUrls = getMediaUrls(
-    playlist,
-    playlistUrl
-  );
+  // ---------------------------------------------------
+  // MEDIA PLAYLIST
+  // ---------------------------------------------------
 
-  if (mediaUrls.length === 0) {
+  const urls =
+    getPlaylistUrls(
+      playlist,
+      playlistUrl
+    );
+
+  if (urls.length === 0) {
     console.warn(
-      "[SW RESOLVER] RECHAZADO: playlist sin segmentos"
+      "[SW RESOLVER] Playlist sin segmentos"
     );
 
     return null;
   }
 
   console.log(
-    `[SW RESOLVER] Segmentos encontrados: ${mediaUrls.length}`
+    `[SW RESOLVER] Segmentos detectados: ${urls.length}`
   );
 
-  const sample = mediaUrls.slice(0, 8);
+  const sample =
+    urls.slice(0, 10);
 
-  let suspicious = 0;
+  let suspiciousCount = 0;
 
-  for (const segmentUrl of sample) {
+  for (const mediaUrl of sample) {
     console.log(
-      `[SW RESOLVER] segmento: ${segmentUrl}`
+      `[SW RESOLVER] Segmento: ${mediaUrl}`
     );
 
-    if (looksLikeImageOrAd(segmentUrl)) {
-      suspicious++;
+    if (
+      isSuspiciousUrl(
+        mediaUrl
+      )
+    ) {
+      suspiciousCount++;
 
       console.warn(
-        `[SW RESOLVER] segmento sospechoso: ${segmentUrl}`
+        `[SW RESOLVER] Segmento sospechoso: ${mediaUrl}`
       );
     }
   }
 
   if (
-    suspicious === sample.length &&
-    sample.length > 0
+    suspiciousCount > 0
   ) {
     console.warn(
-      "[SW RESOLVER] RECHAZADO: todos los segmentos parecen imágenes/publicidad"
-    );
-
-    return null;
-  }
-
-  if (
-    suspicious >=
-    Math.ceil(sample.length / 2)
-  ) {
-    console.warn(
-      `[SW RESOLVER] RECHAZADO: ${suspicious}/${sample.length} segmentos parecen publicidad/imágenes`
+      `[SW RESOLVER] RECHAZADO: ${suspiciousCount}/${sample.length} segmentos sospechosos`
     );
 
     return null;
   }
 
   console.log(
-    `[SW RESOLVER] PLAYLIST OK: ${playlistUrl}`
+    `[SW RESOLVER] PLAYLIST VÁLIDO: ${playlistUrl}`
   );
 
   return playlistUrl;
 }
+
+// =====================================================
+// GENERAR DOMINIO ALTERNATIVO STREAMWISH
+// =====================================================
 
 async function redir(pageUrl) {
   try {
@@ -311,30 +367,36 @@ async function redir(pageUrl) {
       "wish-redirect.aiavh.com",
     ];
 
-    const url = new URL(pageUrl);
+    const parsed =
+      new URL(pageUrl);
+
+    const hostname =
+      parsed.hostname
+        .replace(/^www\./, "")
+        .toLowerCase();
+
+    const pool =
+      rules.includes(hostname)
+        ? main
+        : dmca;
 
     const destination =
-      rules.includes(url.hostname)
-        ? main[
-            Math.floor(
-              Math.random() * main.length
-            )
-          ]
-        : dmca[
-            Math.floor(
-              Math.random() * dmca.length
-            )
-          ];
+      pool[
+        Math.floor(
+          Math.random() *
+          pool.length
+        )
+      ];
 
     return (
       "https://" +
       destination +
-      url.pathname +
-      url.search
+      parsed.pathname +
+      parsed.search
     );
   } catch (error) {
     console.error(
-      "[SW RESOLVER] Error al generar redirectUrl:",
+      "[SW RESOLVER] Error generando redirect:",
       error.message
     );
 
@@ -342,63 +404,99 @@ async function redir(pageUrl) {
   }
 }
 
+// =====================================================
+// DESCARGAR HTML STREAMWISH
+// =====================================================
+
+async function fetchStreamwishHtml(
+  url,
+  referer
+) {
+  const response =
+    await axiosGet(url, {
+      headers: {
+        "User-Agent": UA,
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        Referer:
+          referer || url,
+      },
+    });
+
+  let html =
+    response.data;
+
+  if (Buffer.isBuffer(html)) {
+    html =
+      html.toString(
+        "utf8"
+      );
+  }
+
+  return html;
+}
+
+// =====================================================
+// EXTRACT STREAMWISH
+// =====================================================
+
 async function extractStreamwish(pageUrl) {
+  console.log("");
+  console.log(
+    "======================================"
+  );
+
   console.log(
     `[SW RESOLVER] Resolviendo: ${pageUrl}`
   );
 
   try {
-    const finalUrl = await redir(pageUrl);
+    const finalUrl =
+      await redir(pageUrl);
 
     console.log(
-      `[SW RESOLVER] URL redirigida: ${finalUrl}`
+      `[SW RESOLVER] URL alternativa: ${finalUrl}`
     );
 
-    let html;
+    let html = null;
 
+    // Primero probar dominio alternativo
     try {
-      const res = await axiosGet(finalUrl, {
-        headers: {
-          "User-Agent": UA,
-          Accept:
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          Referer: pageUrl,
-        },
-      });
-
-      html = res.data;
-    } catch (e) {
+      html =
+        await fetchStreamwishHtml(
+          finalUrl,
+          pageUrl
+        );
+    } catch (error) {
       console.warn(
-        "[SW RESOLVER] Falló URL redirigida, probando original:",
-        e.message
+        `[SW RESOLVER] Falló dominio alternativo: ${error.message}`
       );
+    }
 
+    // Si falla, probar original
+    if (!html) {
       try {
-        const res = await axiosGet(pageUrl, {
-          headers: {
-            "User-Agent": UA,
-            Accept:
-              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            Referer: pageUrl,
-          },
-        });
+        console.log(
+          "[SW RESOLVER] Probando URL original..."
+        );
 
-        html = res.data;
-      } catch (errOriginal) {
+        html =
+          await fetchStreamwishHtml(
+            pageUrl,
+            pageUrl
+          );
+      } catch (error) {
         console.error(
-          "[SW RESOLVER] Falló también URL original:",
-          errOriginal.message
+          `[SW RESOLVER] Falló URL original: ${error.message}`
         );
 
         return null;
       }
     }
 
-    if (Buffer.isBuffer(html)) {
-      html = html.toString("utf8");
-    }
-
-    if (typeof html !== "string") {
+    if (
+      typeof html !== "string"
+    ) {
       console.error(
         "[SW RESOLVER] HTML inválido"
       );
@@ -406,36 +504,48 @@ async function extractStreamwish(pageUrl) {
       return null;
     }
 
-    const scriptMatch = html.match(
-      /<script[^>]*type=['"]text\/javascript['"][^>]*>\s*(eval\(function\(p,a,c,k,e,d\)[\s\S]*?)<\/script>/i
-    );
+    // =================================================
+    // EXTRAER SCRIPT PACKED
+    // =================================================
+
+    const scriptMatch =
+      html.match(
+        /<script[^>]*type=['"]text\/javascript['"][^>]*>\s*(eval\(function\(p,a,c,k,e,d\)[\s\S]*?)<\/script>/i
+      );
 
     if (!scriptMatch) {
-      console.log(
+      console.warn(
         "[SW RESOLVER] Script packed no encontrado"
       );
 
       return null;
     }
 
-    const packedJs = scriptMatch[1];
+    const packedJs =
+      scriptMatch[1];
 
     if (!detect(packedJs)) {
-      console.log(
-        "[SW RESOLVER] Script no parece Packer"
+      console.warn(
+        "[SW RESOLVER] Script no reconocido por unpacker"
       );
 
       return null;
     }
 
-    const unpacked = unpack(packedJs);
+    const unpacked =
+      unpack(packedJs);
 
-    const linksMatch = unpacked.match(
-      /var\s+links\s*=\s*(\{[\s\S]*?\});/i
-    );
+    // =================================================
+    // EXTRAER OBJETO links
+    // =================================================
+
+    const linksMatch =
+      unpacked.match(
+        /var\s+links\s*=\s*(\{[\s\S]*?\});/i
+      );
 
     if (!linksMatch) {
-      console.log(
+      console.warn(
         "[SW RESOLVER] Objeto links no encontrado"
       );
 
@@ -445,16 +555,27 @@ async function extractStreamwish(pageUrl) {
     let links;
 
     try {
-      links = JSON.parse(
-        linksMatch[1]
-      );
-    } catch (_e) {
-      console.log(
-        "[SW RESOLVER] Error parseando links"
+      links =
+        JSON.parse(
+          linksMatch[1]
+        );
+    } catch (error) {
+      console.error(
+        `[SW RESOLVER] Error parseando links: ${error.message}`
       );
 
       return null;
     }
+
+    console.log(
+      `[SW RESOLVER] links encontrados: ${Object.keys(
+        links
+      ).join(", ")}`
+    );
+
+    // =================================================
+    // PROBAR TODOS LOS HLS
+    // =================================================
 
     const candidates = [
       ["hls4", links.hls4],
@@ -463,61 +584,84 @@ async function extractStreamwish(pageUrl) {
       ["hls2", links.hls2],
     ];
 
-    for (const [name, rawLink] of candidates) {
-      if (!rawLink) {
+    for (
+      const [
+        name,
+        rawUrl
+      ] of candidates
+    ) {
+      if (!rawUrl) {
+        console.log(
+          `[SW RESOLVER] ${name}: no existe`
+        );
+
         continue;
       }
 
-      const masterUrl = rawLink.startsWith("/")
-        ? new URL(rawLink, finalUrl).href
-        : rawLink;
+      let candidateUrl;
+
+      try {
+        candidateUrl =
+          absoluteUrl(
+            rawUrl,
+            finalUrl
+          );
+      } catch (_e) {
+        candidateUrl =
+          rawUrl;
+      }
 
       console.log("");
       console.log(
-        `[SW RESOLVER] Probando ${name}: ${masterUrl}`
+        `[SW RESOLVER] Probando ${name}`
       );
 
-      if (looksLikeImageOrAd(masterUrl)) {
-        console.warn(
-          `[SW RESOLVER] ${name} rechazado directamente`
-        );
+      console.log(
+        `[SW RESOLVER] URL: ${candidateUrl}`
+      );
 
-        continue;
-      }
-
-      const validUrl =
-        await validateMediaPlaylist(
-          masterUrl,
+      const valid =
+        await validatePlaylist(
+          candidateUrl,
           finalUrl
         );
 
-      if (validUrl) {
+      if (valid) {
         console.log("");
         console.log(
-          `[SW RESOLVER] ***** ${name} VÁLIDO *****`
+          `========== ${name} VÁLIDO ==========`
         );
 
         console.log(
-          `[SW RESOLVER] URL FINAL: ${validUrl}`
+          `[SW RESOLVER] URL FINAL: ${valid}`
         );
 
-        return validUrl;
+        console.log(
+          "======================================"
+        );
+
+        return valid;
       }
 
       console.warn(
-        `[SW RESOLVER] ${name} inválido, probando siguiente...`
+        `[SW RESOLVER] ${name} RECHAZADO`
       );
     }
 
+    console.error("");
     console.error(
-      "[SW RESOLVER] Ningún HLS válido encontrado"
+      "[SW RESOLVER] NINGÚN HLS VÁLIDO"
+    );
+
+    console.log(
+      "======================================"
     );
 
     return null;
-  } catch (err) {
+
+  } catch (error) {
     console.error(
-      "[SW RESOLVER] Error:",
-      err.message
+      `[SW RESOLVER] ERROR GENERAL: ${error.message}`
     );
 
     return null;
