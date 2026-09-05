@@ -10,6 +10,7 @@ const rateLimit = require("express-rate-limit");
 
 const contentRoutes = require("./routes/content.routes");
 const hlsRoutes = require("./routes/hls.routes");
+const imageRoutes = require("./routes/image.routes");
 const downloadService = require("./services/download.service");
 const { ApiError } = require("./utils/api-error");
 
@@ -92,6 +93,15 @@ const scrapeLimiter = rateLimit({
 // =====================================================
 
 app.use("/api/hls", hlsRoutes);
+
+// =====================================================
+// IMAGE PROXY
+//
+// También va antes del apiLimiter general para que
+// cargar muchas carátulas no consuma el límite de API.
+// =====================================================
+
+app.use("/api/image", imageRoutes);
 
 // =====================================================
 // API RATE LIMITS
@@ -187,6 +197,10 @@ app.get("/api", (_req, res) => {
       hls: [
         "/api/hls/resolve?url=EMBED_URL",
         "/api/hls/p/:token",
+      ],
+
+      images: [
+        "/api/image?url=IMAGE_URL",
       ],
 
       legacy: [
