@@ -20,7 +20,10 @@ const port = Number(process.env.PORT || 5555);
 // Trust proxy (necessary for rate-limit behind Nginx/PM2/Railway)
 app.set("trust proxy", 1);
 
-// Global Middlewares
+// =====================================================
+// GLOBAL MIDDLEWARES
+// =====================================================
+
 app.use(compression());
 
 app.use(
@@ -29,8 +32,15 @@ app.use(
       directives: {
         defaultSrc: ["'self'"],
         frameSrc: ["'self'", "*"],
-        scriptSrc: ["'self'", "'unsafe-inline'", "https://unpkg.com"],
-        connectSrc: ["'self'", "https://unpkg.com"],
+        scriptSrc: [
+          "'self'",
+          "'unsafe-inline'",
+          "https://unpkg.com"
+        ],
+        connectSrc: [
+          "'self'",
+          "https://unpkg.com"
+        ],
         styleSrc: [
           "'self'",
           "'unsafe-inline'",
@@ -87,27 +97,36 @@ const scrapeLimiter = rateLimit({
 // =====================================================
 // HLS PROXY
 //
-// IMPORTANTE:
-// Va ANTES del apiLimiter general porque Roku solicitará
-// muchos segmentos del video durante la reproducción.
+// Va ANTES del apiLimiter general porque Roku solicita
+// muchos segmentos durante la reproducción.
 // =====================================================
 
-app.use("/api/hls", hlsRoutes);
+app.use(
+  "/api/hls",
+  hlsRoutes
+);
 
 // =====================================================
-// IMAGE PROXY
+// IMAGE / POSTER PROXY
 //
-// También va antes del apiLimiter general para que
-// cargar muchas carátulas no consuma el límite de API.
+// También va ANTES del apiLimiter general.
+// De esta forma podemos cargar muchos posters sin
+// consumir el límite normal de la API.
 // =====================================================
 
-app.use("/api/image", imageRoutes);
+app.use(
+  "/api/image",
+  imageRoutes
+);
 
 // =====================================================
 // API RATE LIMITS
 // =====================================================
 
-app.use("/api/", apiLimiter);
+app.use(
+  "/api/",
+  apiLimiter
+);
 
 app.use(
   "/api/v1/content/resolve",
@@ -150,7 +169,10 @@ const staticDownloadOptions = {
 
 app.use(
   express.static(
-    path.join(__dirname, "../public")
+    path.join(
+      __dirname,
+      "../public"
+    )
   )
 );
 
@@ -174,46 +196,50 @@ app.use(
 // API INFORMATION
 // =====================================================
 
-app.get("/api", (_req, res) => {
-  res.status(200).json({
-    success: true,
+app.get(
+  "/api",
+  (_req, res) => {
 
-    message:
-      "PeliApi scraper y descargas backend",
+    res.status(200).json({
+      success: true,
 
-    version: "1.1.0",
+      message:
+        "PeliApi scraper y descargas backend",
 
-    endpoints: {
+      version: "1.1.0",
 
-      modern: [
-        "/api/v1/content/search",
-        "/api/v1/content/catalog",
-        "/api/v1/content/genres",
-        "/api/v1/content/info/:slug",
-        "/api/v1/content/servers",
-        "/api/v1/content/resolve",
-      ],
+      endpoints: {
 
-      hls: [
-        "/api/hls/resolve?url=EMBED_URL",
-        "/api/hls/p/:token",
-      ],
+        modern: [
+          "/api/v1/content/search",
+          "/api/v1/content/catalog",
+          "/api/v1/content/genres",
+          "/api/v1/content/info/:slug",
+          "/api/v1/content/servers",
+          "/api/v1/content/resolve",
+        ],
 
-      images: [
-        "/api/image?url=IMAGE_URL",
-      ],
+        hls: [
+          "/api/hls/resolve?url=EMBED_URL",
+          "/api/hls/p/:token",
+        ],
 
-      legacy: [
-        "/api/pelisplus/search",
-        "/api/pelisplus/catalog",
-        "/api/pelisplus/genres",
-        "/api/pelisplus/info/:slug",
-        "/api/pelisplus/servers",
-        "/api/pelisplus/resolve",
-      ],
-    },
-  });
-});
+        images: [
+          "/api/image?url=IMAGE_URL",
+        ],
+
+        legacy: [
+          "/api/pelisplus/search",
+          "/api/pelisplus/catalog",
+          "/api/pelisplus/genres",
+          "/api/pelisplus/info/:slug",
+          "/api/pelisplus/servers",
+          "/api/pelisplus/resolve",
+        ],
+      },
+    });
+  }
+);
 
 // =====================================================
 // HEALTH CHECK
@@ -294,8 +320,10 @@ app.get(
     res.status(200).json({
       success: true,
       status: "ok",
+
       chromeProcesses:
         chromeCount,
+
       memoryWarning:
         chromeCount > 10
     });
