@@ -9,44 +9,59 @@ const compression = require("compression");
 const rateLimit = require("express-rate-limit");
 
 const contentRoutes = require("./routes/content.routes");
+const hlsRoutes = require("./routes/hls.routes");
 const downloadService = require("./services/download.service");
 const { ApiError } = require("./utils/api-error");
 
 const app = express();
 const port = Number(process.env.PORT || 5555);
 
-// Trust proxy (necessary for rate-limit behind Nginx/PM2)
+// Trust proxy (necessary for rate-limit behind Nginx/PM2 / Railway)
 app.set("trust proxy", 1);
 
 // Global Middlewares
 app.use(compression());
+
 app.use(
   helmet({
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
-        frameSrc: ["'self'", "*"], // Allow iframe embeds from any domain
+        frameSrc: ["'self'", "*"],
         scriptSrc: ["'self'", "'unsafe-inline'", "https://unpkg.com"],
-        connectSrc: ["'self'", "https://unpkg.com"], // Allow Ionicons fetch SVGs
-        styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+        connectSrc: ["'self'", "https://unpkg.com"],
+        styleSrc: [
+          "'self'",
+          "'unsafe-inline'",
+          "https://fonts.googleapis.com",
+        ],
         fontSrc: ["'self'", "https://fonts.gstatic.com"],
         imgSrc: ["'self'", "data:", "https:"],
       },
     },
-    crossOriginResourcePolicy: { policy: "cross-origin" },
+    crossOriginResourcePolicy: {
+      policy: "cross-origin",
+    },
   })
 );
+
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 app.use(morgan("dev"));
 
+// =====================================================
 // Rate Limiting
+// =====================================================
+
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { success: false, message: "Demasiadas peticiones. Espera 1 minuto." }
+  message: {
+    success: false,
+    message: "Demasiadas peticiones. Espera 1 minuto.",
+  },
 });
 
 const scrapeLimiter = rateLimit({
@@ -54,35 +69,72 @@ const scrapeLimiter = rateLimit({
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { success: false, message: "Límite de scrapeo alcanzado. Espera 1 minuto." }
+  message: {
+    success: false,
+    message: "Límite de scrapeo alcanzado. Espera 1 minuto.",
+  },
 });
 
+// =====================================================
+// HLS PROXY
+// IMPORTANTE:
+// Tiene que estar ANTES del apiLimiter general.
+// Un video HLS puede pedir muchos segmentos por minuto.
+// =====================================================
+
+app.use("/api/hls", hlsRoutes);
+
+// =====================================================
+// API Rate Limits
+// =====================================================
+
 app.use("/api/", apiLimiter);
+
 app.use("/api/v1/content/resolve", scrapeLimiter);
 app.use("/api/v1/content/search", scrapeLimiter);
+
 app.use("/api/pelisplus/resolve", scrapeLimiter);
 app.use("/api/pelisplus/search", scrapeLimiter);
 
+// =====================================================
 // Static files
+// =====================================================
+
 const downloadsDir = downloadService.getDownloadsDir();
+
 const staticDownloadOptions = {
   index: false,
   fallthrough: false,
   setHeaders: (res, filePath) => {
-    res.setHeader("Content-Disposition", `attachment; filename="${path.basename(filePath)}"`);
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${path.basename(filePath)}"`
+    );
   },
 };
 
 app.use(express.static(path.join(__dirname, "../public")));
-app.use("/downloads", express.static(downloadsDir, staticDownloadOptions));
-app.use("/api/downloads", express.static(downloadsDir, staticDownloadOptions));
 
-// Routes
+app.use(
+  "/downloads",
+  express.static(downloadsDir, staticDownloadOptions)
+);
+
+app.use(
+  "/api/downloads",
+  express.static(downloadsDir, staticDownloadOptions)
+);
+
+// =====================================================
+// API info
+// =====================================================
+
 app.get("/api", (_req, res) => {
   res.status(200).json({
     success: true,
     message: "PeliApi scraper y descargas backend",
-    version: "1.0.0",
+    version: "1.1.0",
+
     endpoints: {
       modern: [
         "/api/v1/content/search",
@@ -92,6 +144,12 @@ app.get("/api", (_req, res) => {
         "/api/v1/content/servers",
         "/api/v1/content/resolve",
       ],
+
+      hls: [
+        "/api/hls/resolve?url=EMBED_URL",
+        "/api/hls/p/:token",
+      ],
+
       legacy: [
         "/api/pelisplus/search",
         "/api/pelisplus/catalog",
@@ -104,23 +162,42 @@ app.get("/api", (_req, res) => {
   });
 });
 
+// =====================================================
+// Health
+// =====================================================
+
 app.get("/health", async (_req, res) => {
   const { exec } = require("child_process");
   const util = require("util");
   const execAsync = util.promisify(exec);
-  
+
   let chromeCount = 0;
+
   try {
     if (process.platform === "win32") {
-      const { stdout } = await execAsync('tasklist /FI "IMAGENAME eq chrome.exe" /NH || true');
-      if (stdout.includes("No tasks are running") || stdout.includes("No se ejecutan tareas")) {
+      const { stdout } = await execAsync(
+        'tasklist /FI "IMAGENAME eq chrome.exe" /NH || true'
+      );
+
+      if (
+        stdout.includes("No tasks are running") ||
+        stdout.includes("No se ejecutan tareas")
+      ) {
         chromeCount = 0;
       } else {
-        chromeCount = stdout.split("\n").filter(line => line.toLowerCase().includes("chrome.exe")).length;
+        chromeCount = stdout
+          .split("\n")
+          .filter((line) =>
+            line.toLowerCase().includes("chrome.exe")
+          ).length;
       }
     } else {
-      const { stdout } = await execAsync("pgrep -c chrome || true");
-      chromeCount = parseInt(stdout.trim()) || 0;
+      const { stdout } = await execAsync(
+        "pgrep -c chrome || true"
+      );
+
+      chromeCount =
+        parseInt(stdout.trim()) || 0;
     }
   } catch (e) {
     chromeCount = -1;
@@ -130,44 +207,99 @@ app.get("/health", async (_req, res) => {
     success: true,
     status: "ok",
     chromeProcesses: chromeCount,
-    memoryWarning: chromeCount > 10
+    memoryWarning: chromeCount > 10,
   });
 });
 
-app.use("/api/v1/content", contentRoutes);
-app.use("/api/pelisplus", contentRoutes);
+// =====================================================
+// Content Routes
+// =====================================================
 
+app.use(
+  "/api/v1/content",
+  contentRoutes
+);
+
+app.use(
+  "/api/pelisplus",
+  contentRoutes
+);
+
+// =====================================================
 // 404
+// =====================================================
+
 app.use((_req, _res, next) => {
-  next(new ApiError(404, "Endpoint no encontrado"));
+  next(
+    new ApiError(
+      404,
+      "Endpoint no encontrado"
+    )
+  );
 });
 
+// =====================================================
 // Error handler
+// =====================================================
+
 app.use((error, _req, res, _next) => {
-  const statusCode = error.statusCode || 500;
+  const statusCode =
+    error.statusCode || 500;
+
   const response = {
     success: false,
-    message: error.message || "Error interno del servidor",
+    message:
+      error.message ||
+      "Error interno del servidor",
   };
-  if (process.env.NODE_ENV !== "production" && error.details) {
-    response.error = error.details;
+
+  if (
+    process.env.NODE_ENV !== "production" &&
+    error.details
+  ) {
+    response.error =
+      error.details;
   }
-  res.status(statusCode).json(response);
+
+  res
+    .status(statusCode)
+    .json(response);
 });
 
-// Check yt-dlp availability at startup (non-blocking)
-const ytdlpResolver = require("./utils/resolvers/ytdlp.resolver");
-ytdlpResolver.checkYtdlpAvailability().then(() => {
-  if (ytdlpResolver.isAvailable) {
-    console.log(`[SYSTEM] yt-dlp detectado con éxito. Utilizando como resolvedor primario.`);
-  } else {
-    console.log(`[SYSTEM] yt-dlp no está instalado o no se encuentra en el PATH. Se usará Puppeteer como fallback.`);
-  }
-});
+// =====================================================
+// Check yt-dlp availability
+// =====================================================
 
-const server = app.listen(port, () => {
-  console.log(`PeliApi listening on http://localhost:${port}`);
-});
+const ytdlpResolver = require(
+  "./utils/resolvers/ytdlp.resolver"
+);
+
+ytdlpResolver
+  .checkYtdlpAvailability()
+  .then(() => {
+    if (ytdlpResolver.isAvailable) {
+      console.log(
+        "[SYSTEM] yt-dlp detectado con éxito. Utilizando como resolvedor primario."
+      );
+    } else {
+      console.log(
+        "[SYSTEM] yt-dlp no está instalado o no se encuentra en el PATH. Se usará Puppeteer como fallback."
+      );
+    }
+  });
+
+// =====================================================
+// Start Server
+// =====================================================
+
+const server = app.listen(
+  port,
+  () => {
+    console.log(
+      `PeliApi listening on http://localhost:${port}`
+    );
+  }
+);
 
 server.timeout = 35000;
 server.keepAliveTimeout = 35000;
