@@ -2,40 +2,79 @@ const cheerio = require("cheerio");
 const { fetchHtml } = require("../utils/http");
 const { ApiError } = require("../utils/api-error");
 
-const BASE_URL = process.env.PELISPLUS_DOMAIN || "https://www.pelisplushd.la";
+const BASE_URL =
+  process.env.PELISPLUS_DOMAIN ||
+  "https://www.pelisplushd.la";
+
+const PUBLIC_BASE_URL =
+  process.env.PUBLIC_BASE_URL ||
+  "https://peliapi-production.up.railway.app";
 
 /**
- * Normaliza las URLs para que siempre apunten a nuestro dominio o sean absolutas
+ * Convierte una URL de imagen externa en una URL
+ * que pasa por nuestro proxy.
+ */
+function getProxiedImageUrl(url) {
+  if (!url) return "";
+
+  // Evita proxificar dos veces la misma imagen
+  if (url.includes("/api/image?url=")) {
+    return url;
+  }
+
+  return `${PUBLIC_BASE_URL}/api/image?url=${encodeURIComponent(url)}`;
+}
+
+/**
+ * Normaliza las URLs para que siempre apunten
+ * al dominio correcto o sean absolutas
  */
 function getAbsoluteUrl(path) {
   if (!path) return "";
-  if (path.startsWith("http://") || path.startsWith("https://")) {
+
+  if (
+    path.startsWith("http://") ||
+    path.startsWith("https://")
+  ) {
     return path;
   }
+
   return `${BASE_URL}${path.startsWith("/") ? "" : "/"}${path}`;
 }
 
 /**
- * Obtiene el tipo del contenido (movie, series, anime) a partir del path
+ * Obtiene el tipo del contenido
+ * movie, series o anime
  */
 function detectTypeFromPath(path) {
   if (!path) return "movie";
-  if (path.includes("/pelicula/")) return "movie";
-  if (path.includes("/serie/")) return "series";
-  if (path.includes("/anime/")) return "anime";
+
+  if (path.includes("/pelicula/")) {
+    return "movie";
+  }
+
+  if (path.includes("/serie/")) {
+    return "series";
+  }
+
+  if (path.includes("/anime/")) {
+    return "anime";
+  }
+
   return "movie";
 }
 
 /**
- * Extrae el slug a partir del path de PelisPlus
+ * Extrae el slug desde una URL/path
  */
 function extractSlugFromPath(path) {
   if (!path) return "";
-  const parts = path.split("/").filter(Boolean);
-  // Ejemplos:
-  // /pelicula/el-padrino -> "el-padrino"
-  // /serie/breaking-bad -> "breaking-bad"
-  // /anime/naruto -> "naruto"
+
+  const parts =
+    path
+      .split("/")
+      .filter(Boolean);
+
   return parts[parts.length - 1] || "";
 }
 
@@ -44,55 +83,116 @@ function extractSlugFromPath(path) {
  */
 async function searchContent(query) {
   if (!query) {
-    throw new ApiError(400, "El parametro de busqueda 's' o 'q' es requerido");
+    throw new ApiError(
+      400,
+      "El parametro de busqueda 's' o 'q' es requerido"
+    );
   }
 
-  const url = `${BASE_URL}/search?s=${encodeURIComponent(query)}`;
-  const html = await fetchHtml(url);
-  const $ = cheerio.load(html);
+  const url =
+    `${BASE_URL}/search?s=${encodeURIComponent(query)}`;
+
+  const html =
+    await fetchHtml(url);
+
+  const $ =
+    cheerio.load(html);
+
   const results = [];
 
-  $("a.Posters-link").each((_, element) => {
-    const el = $(element);
-    const href = el.attr("href") || "";
-    const title = el.attr("data-title") || el.find(".listing-content p").text().trim() || "";
-    const poster = getAbsoluteUrl(el.find("img.Posters-img").attr("src") || "");
-    const ratingText = el.find(".rating span").text().trim();
-    const rating = ratingText ? ratingText.split("/")[0] : null;
-    const type = detectTypeFromPath(href);
-    const slug = extractSlugFromPath(href);
+  $("a.Posters-link").each(
+    (_, element) => {
 
-    if (slug) {
-      results.push({
-        id: slug,
-        slug,
-        title,
-        poster,
-        rating,
-        type,
-        url: getAbsoluteUrl(href),
-      });
+      const el =
+        $(element);
+
+      const href =
+        el.attr("href") || "";
+
+      const title =
+        el.attr("data-title") ||
+        el
+          .find(".listing-content p")
+          .text()
+          .trim() ||
+        "";
+
+      const originalPoster =
+        getAbsoluteUrl(
+          el
+            .find("img.Posters-img")
+            .attr("src") ||
+          ""
+        );
+
+      const poster =
+        getProxiedImageUrl(
+          originalPoster
+        );
+
+      const ratingText =
+        el
+          .find(".rating span")
+          .text()
+          .trim();
+
+      const rating =
+        ratingText
+          ? ratingText.split("/")[0]
+          : null;
+
+      const type =
+        detectTypeFromPath(href);
+
+      const slug =
+        extractSlugFromPath(href);
+
+      if (slug) {
+        results.push({
+          id: slug,
+          slug,
+          title,
+          poster,
+          rating,
+          type,
+          url:
+            getAbsoluteUrl(href),
+        });
+      }
     }
-  });
+  );
 
   return results;
 }
 
 /**
- * Obtiene el catalogo por tipo (movies, series, anime), genero, año, etc.
+ * Obtiene el catálogo por tipo
  */
-async function getCatalog(type = "movie", genre = "", page = 1) {
+async function getCatalog(
+  type = "movie",
+  genre = "",
+  page = 1
+) {
+
   let path = "";
+
   if (genre) {
-    path = `/generos/${genre}`;
+
+    path =
+      `/generos/${genre}`;
+
   } else {
+
     switch (type) {
+
       case "series":
         path = "/series";
         break;
+
       case "anime":
         path = "/animes";
         break;
+
       case "movie":
       default:
         path = "/peliculas";
@@ -100,37 +200,91 @@ async function getCatalog(type = "movie", genre = "", page = 1) {
     }
   }
 
-  const separator = path.includes("?") ? "&" : "?";
-  const url = `${BASE_URL}${path}${separator}page=${page}`;
-  const html = await fetchHtml(url);
-  const $ = cheerio.load(html);
+  const separator =
+    path.includes("?")
+      ? "&"
+      : "?";
+
+  const url =
+    `${BASE_URL}${path}${separator}page=${page}`;
+
+  const html =
+    await fetchHtml(url);
+
+  const $ =
+    cheerio.load(html);
+
   const items = [];
 
-  $("a.Posters-link").each((_, element) => {
-    const el = $(element);
-    const href = el.attr("href") || "";
-    const title = el.attr("data-title") || el.find(".listing-content p").text().trim() || "";
-    const poster = getAbsoluteUrl(el.find("img.Posters-img").attr("src") || "");
-    const ratingText = el.find(".rating span").text().trim();
-    const rating = ratingText ? ratingText.split("/")[0] : null;
-    const contentType = detectTypeFromPath(href);
-    const slug = extractSlugFromPath(href);
+  $("a.Posters-link").each(
+    (_, element) => {
 
-    if (slug) {
-      items.push({
-        id: slug,
-        slug,
-        title,
-        poster,
-        rating,
-        type: contentType,
-        url: getAbsoluteUrl(href),
-      });
+      const el =
+        $(element);
+
+      const href =
+        el.attr("href") || "";
+
+      const title =
+        el.attr("data-title") ||
+        el
+          .find(".listing-content p")
+          .text()
+          .trim() ||
+        "";
+
+      const originalPoster =
+        getAbsoluteUrl(
+          el
+            .find("img.Posters-img")
+            .attr("src") ||
+          ""
+        );
+
+      const poster =
+        getProxiedImageUrl(
+          originalPoster
+        );
+
+      const ratingText =
+        el
+          .find(".rating span")
+          .text()
+          .trim();
+
+      const rating =
+        ratingText
+          ? ratingText.split("/")[0]
+          : null;
+
+      const contentType =
+        detectTypeFromPath(href);
+
+      const slug =
+        extractSlugFromPath(href);
+
+      if (slug) {
+
+        items.push({
+          id: slug,
+          slug,
+          title,
+          poster,
+          rating,
+          type: contentType,
+          url:
+            getAbsoluteUrl(href),
+        });
+      }
     }
-  });
+  );
 
-  // Paginación
-  const hasNextPage = $(".pagination a[rel='next']").length > 0 || $(".pagination .page-item:last-child:not(.disabled) a").length > 0;
+  const hasNextPage =
+    $(".pagination a[rel='next']")
+      .length > 0 ||
+    $(
+      ".pagination .page-item:last-child:not(.disabled) a"
+    ).length > 0;
 
   return {
     items,
@@ -140,51 +294,176 @@ async function getCatalog(type = "movie", genre = "", page = 1) {
 }
 
 /**
- * Obtiene la información detallada de una película o serie
+ * Información detallada
  */
-async function getContentInfo(slug, type = "movie") {
+async function getContentInfo(
+  slug,
+  type = "movie"
+) {
+
   if (!slug) {
-    throw new ApiError(400, "El slug del contenido es requerido");
+    throw new ApiError(
+      400,
+      "El slug del contenido es requerido"
+    );
   }
 
-  const path = type === "movie" ? `/pelicula/${slug}` : `/serie/${slug}`;
-  const url = `${BASE_URL}${path}`;
-  const html = await fetchHtml(url);
-  const $ = cheerio.load(html);
+  const path =
+    type === "movie"
+      ? `/pelicula/${slug}`
+      : `/serie/${slug}`;
 
-  const title = $("h1.m-b-5").text().trim() || $(".font-size-26.font-weight-bold").text().trim() || "";
+  const url =
+    `${BASE_URL}${path}`;
+
+  const html =
+    await fetchHtml(url);
+
+  const $ =
+    cheerio.load(html);
+
+  const title =
+    $("h1.m-b-5")
+      .text()
+      .trim() ||
+    $(".font-size-26.font-weight-bold")
+      .text()
+      .trim() ||
+    "";
+
   if (!title) {
-    throw new ApiError(404, "Contenido no encontrado en PelisPlus");
+
+    throw new ApiError(
+      404,
+      "Contenido no encontrado en PelisPlus"
+    );
   }
 
-  const originalTitle = $("p.text-opacity").text().trim() || "";
-  const synopsis = $(".text-large").text().trim() || $("#synopsis").text().trim() || "";
-  const poster = getAbsoluteUrl($("img.img-fluid.m-b-15").attr("src") || $(".img-fluid.rounded").attr("src") || "");
-  const ratingVal = $(".font-size-36.font-weight-bold").text().trim();
-  const rating = ratingVal ? ratingVal : null;
-  const yearMatch = $(".font-size-18.text-info").text().trim().match(/\d{4}/);
-  const year = yearMatch ? yearMatch[0] : null;
+  const originalTitle =
+    $("p.text-opacity")
+      .text()
+      .trim() ||
+    "";
+
+  const synopsis =
+    $(".text-large")
+      .text()
+      .trim() ||
+    $("#synopsis")
+      .text()
+      .trim() ||
+    "";
+
+  const originalPoster =
+    getAbsoluteUrl(
+      $("img.img-fluid.m-b-15")
+        .attr("src") ||
+      $(".img-fluid.rounded")
+        .attr("src") ||
+      ""
+    );
+
+  const poster =
+    getProxiedImageUrl(
+      originalPoster
+    );
+
+  const ratingVal =
+    $(".font-size-36.font-weight-bold")
+      .text()
+      .trim();
+
+  const rating =
+    ratingVal
+      ? ratingVal
+      : null;
+
+  const yearMatch =
+    $(".font-size-18.text-info")
+      .text()
+      .trim()
+      .match(/\d{4}/);
+
+  const year =
+    yearMatch
+      ? yearMatch[0]
+      : null;
 
   const genres = [];
-  $("a[href^='/generos/']").each((_, el) => {
-    const text = $(el).text().trim();
-    const gSlug = $(el).attr("href").split("/").pop();
-    if (text) {
-      genres.push({ name: text, slug: gSlug });
-    }
-  });
 
-  // Metadatos adicionales (elenco, director)
+  $("a[href^='/generos/']").each(
+    (_, el) => {
+
+      const text =
+        $(el)
+          .text()
+          .trim();
+
+      const href =
+        $(el)
+          .attr("href") ||
+        "";
+
+      const gSlug =
+        href
+          .split("/")
+          .pop();
+
+      if (text) {
+
+        genres.push({
+          name: text,
+          slug: gSlug,
+        });
+      }
+    }
+  );
+
   const cast = [];
   const directors = [];
-  $(".sectionDetail").each((_, el) => {
-    const text = $(el).text();
-    if (text.includes("Director:")) {
-      $(el).find("a").each((_, a) => directors.push($(a).text().trim()));
-    } else if (text.includes("Elenco:")) {
-      $(el).find("a").each((_, a) => cast.push($(a).text().trim()));
+
+  $(".sectionDetail").each(
+    (_, el) => {
+
+      const text =
+        $(el).text();
+
+      if (
+        text.includes("Director:")
+      ) {
+
+        $(el)
+          .find("a")
+          .each(
+            (_, a) => {
+
+              directors.push(
+                $(a)
+                  .text()
+                  .trim()
+              );
+            }
+          );
+
+      } else if (
+        text.includes("Elenco:")
+      ) {
+
+        $(el)
+          .find("a")
+          .each(
+            (_, a) => {
+
+              cast.push(
+                $(a)
+                  .text()
+                  .trim()
+              );
+            }
+          );
+      }
     }
-  });
+  );
 
   const contentInfo = {
     id: slug,
@@ -203,86 +482,224 @@ async function getContentInfo(slug, type = "movie") {
   };
 
   if (type === "movie") {
-    // Si es película, obtenemos los servidores de reproducción de una vez
-    contentInfo.servers = parseServers($);
+
+    contentInfo.servers =
+      parseServers($);
+
   } else {
-    // Si es serie, obtenemos la estructura de temporadas y capítulos
+
     contentInfo.seasons = [];
-    
-    // Las series suelen estructurar temporadas en paneles o listas
-    const seasonsTab = $(".divseason");
-    if (seasonsTab.length > 0) {
-      seasonsTab.each((_, el) => {
-        const seasonTitle = $(el).text().trim();
-        const seasonNumMatch = seasonTitle.match(/\d+/);
-        const seasonNum = seasonNumMatch ? Number(seasonNumMatch[0]) : 1;
 
-        const episodes = [];
-        // Buscar links de episodios correspondientes a esta temporada
-        // Suelen estar dentro del mismo div o relacionados
-        const nextUl = $(el).next("ul");
-        nextUl.find("a").each((_, epLink) => {
-          const epHref = $(epLink).attr("href") || "";
-          const epText = $(epLink).text().trim();
-          
-          // Formato URL: /serie/{slug}/temporada/{n}/capitulo/{n}
-          const epSlugMatch = epHref.match(/temporada\/(\d+)\/capitulo\/(\d+)/i);
-          if (epSlugMatch) {
-            const epNum = Number(epSlugMatch[2]);
-            episodes.push({
-              number: epNum,
-              title: epText || `Episodio ${epNum}`,
-              url: getAbsoluteUrl(epHref),
-              season: seasonNum,
+    const seasonsTab =
+      $(".divseason");
+
+    if (
+      seasonsTab.length > 0
+    ) {
+
+      seasonsTab.each(
+        (_, el) => {
+
+          const seasonTitle =
+            $(el)
+              .text()
+              .trim();
+
+          const seasonNumMatch =
+            seasonTitle.match(/\d+/);
+
+          const seasonNum =
+            seasonNumMatch
+              ? Number(
+                  seasonNumMatch[0]
+                )
+              : 1;
+
+          const episodes = [];
+
+          const nextUl =
+            $(el)
+              .next("ul");
+
+          nextUl
+            .find("a")
+            .each(
+              (_, epLink) => {
+
+                const epHref =
+                  $(epLink)
+                    .attr("href") ||
+                  "";
+
+                const epText =
+                  $(epLink)
+                    .text()
+                    .trim();
+
+                const epSlugMatch =
+                  epHref.match(
+                    /temporada\/(\d+)\/capitulo\/(\d+)/i
+                  );
+
+                if (epSlugMatch) {
+
+                  const epNum =
+                    Number(
+                      epSlugMatch[2]
+                    );
+
+                  episodes.push({
+                    number: epNum,
+
+                    title:
+                      epText ||
+                      `Episodio ${epNum}`,
+
+                    url:
+                      getAbsoluteUrl(
+                        epHref
+                      ),
+
+                    season:
+                      seasonNum,
+                  });
+                }
+              }
+            );
+
+          episodes.sort(
+            (a, b) =>
+              a.number -
+              b.number
+          );
+
+          contentInfo
+            .seasons
+            .push({
+              number:
+                seasonNum,
+
+              name:
+                seasonTitle ||
+                `Temporada ${seasonNum}`,
+
+              episodes,
             });
-          }
-        });
-
-        // Ordenar episodios por número ascendentemente
-        episodes.sort((a, b) => a.number - b.number);
-
-        contentInfo.seasons.push({
-          number: seasonNum,
-          name: seasonTitle || `Temporada ${seasonNum}`,
-          episodes,
-        });
-      });
-
-      // Ordenar temporadas por número ascendentemente
-      contentInfo.seasons.sort((a, b) => a.number - b.number);
-    } else {
-      // Fallback: buscar cualquier enlace de capítulo en la página
-      const episodesMap = new Map();
-      $("a[href*='/temporada/']").each((_, epLink) => {
-        const epHref = $(epLink).attr("href") || "";
-        const epText = $(epLink).text().trim();
-        const match = epHref.match(/temporada\/(\d+)\/capitulo\/(\d+)/i);
-        if (match) {
-          const sNum = Number(match[1]);
-          const eNum = Number(match[2]);
-
-          if (!episodesMap.has(sNum)) {
-            episodesMap.set(sNum, []);
-          }
-
-          episodesMap.get(sNum).push({
-            number: eNum,
-            title: epText || `Episodio ${eNum}`,
-            url: getAbsoluteUrl(epHref),
-            season: sNum,
-          });
         }
-      });
+      );
 
-      for (const [seasonNum, episodes] of episodesMap.entries()) {
-        episodes.sort((a, b) => a.number - b.number);
-        contentInfo.seasons.push({
-          number: seasonNum,
-          name: `Temporada ${seasonNum}`,
-          episodes,
-        });
+      contentInfo
+        .seasons
+        .sort(
+          (a, b) =>
+            a.number -
+            b.number
+        );
+
+    } else {
+
+      const episodesMap =
+        new Map();
+
+      $("a[href*='/temporada/']")
+        .each(
+          (_, epLink) => {
+
+            const epHref =
+              $(epLink)
+                .attr("href") ||
+              "";
+
+            const epText =
+              $(epLink)
+                .text()
+                .trim();
+
+            const match =
+              epHref.match(
+                /temporada\/(\d+)\/capitulo\/(\d+)/i
+              );
+
+            if (match) {
+
+              const sNum =
+                Number(
+                  match[1]
+                );
+
+              const eNum =
+                Number(
+                  match[2]
+                );
+
+              if (
+                !episodesMap
+                  .has(sNum)
+              ) {
+
+                episodesMap
+                  .set(
+                    sNum,
+                    []
+                  );
+              }
+
+              episodesMap
+                .get(sNum)
+                .push({
+                  number:
+                    eNum,
+
+                  title:
+                    epText ||
+                    `Episodio ${eNum}`,
+
+                  url:
+                    getAbsoluteUrl(
+                      epHref
+                    ),
+
+                  season:
+                    sNum,
+                });
+            }
+          }
+        );
+
+      for (
+        const [
+          seasonNum,
+          episodes
+        ]
+        of episodesMap.entries()
+      ) {
+
+        episodes.sort(
+          (a, b) =>
+            a.number -
+            b.number
+        );
+
+        contentInfo
+          .seasons
+          .push({
+            number:
+              seasonNum,
+
+            name:
+              `Temporada ${seasonNum}`,
+
+            episodes,
+          });
       }
-      contentInfo.seasons.sort((a, b) => a.number - b.number);
+
+      contentInfo
+        .seasons
+        .sort(
+          (a, b) =>
+            a.number -
+            b.number
+        );
     }
   }
 
@@ -290,24 +707,57 @@ async function getContentInfo(slug, type = "movie") {
 }
 
 /**
- * Obtiene los servidores y URLs de reproducción de un episodio específico
+ * Servidores de un episodio
  */
-async function getEpisodeServers(serieSlug, seasonNumber, episodeNumber) {
-  if (!serieSlug || !seasonNumber || !episodeNumber) {
-    throw new ApiError(400, "Los parametros serieSlug, seasonNumber y episodeNumber son requeridos");
+async function getEpisodeServers(
+  serieSlug,
+  seasonNumber,
+  episodeNumber
+) {
+
+  if (
+    !serieSlug ||
+    !seasonNumber ||
+    !episodeNumber
+  ) {
+
+    throw new ApiError(
+      400,
+      "Los parametros serieSlug, seasonNumber y episodeNumber son requeridos"
+    );
   }
 
-  const url = `${BASE_URL}/serie/${serieSlug}/temporada/${seasonNumber}/capitulo/${episodeNumber}`;
-  const html = await fetchHtml(url);
-  const $ = cheerio.load(html);
+  const url =
+    `${BASE_URL}/serie/${serieSlug}/temporada/${seasonNumber}/capitulo/${episodeNumber}`;
 
-  const title = $("h1.m-b-5").text().trim() || "";
-  const servers = parseServers($);
+  const html =
+    await fetchHtml(url);
+
+  const $ =
+    cheerio.load(html);
+
+  const title =
+    $("h1.m-b-5")
+      .text()
+      .trim() ||
+    "";
+
+  const servers =
+    parseServers($);
 
   return {
     serieSlug,
-    season: Number(seasonNumber),
-    episode: Number(episodeNumber),
+
+    season:
+      Number(
+        seasonNumber
+      ),
+
+    episode:
+      Number(
+        episodeNumber
+      ),
+
     title,
     servers,
     url,
@@ -315,113 +765,426 @@ async function getEpisodeServers(serieSlug, seasonNumber, episodeNumber) {
 }
 
 /**
- * Parsea los servidores de la página cargada en Cheerio ($)
+ * Parsea servidores
  */
 function parseServers($) {
+
   const servers = [];
 
-  // Método 1: Estilo moderno con #link_url span + .TbVideoNv li (usado en series/capítulos)
-  if ($("#link_url span").length > 0) {
-    const generalLanguage = $(".divseason").text().trim() || "Latino";
+  // ===================================================
+  // MÉTODO 1
+  // Series / capítulos
+  // ===================================================
 
-    const serverNamesMap = new Map();
-    $(".TbVideoNv li, .VideoPlayer li").each((_, liEl) => {
-      const li = $(liEl);
-      const id = li.attr("data-id") || li.attr("lid") || "";
-      const name = li.text().trim();
-      if (id && name) {
-        serverNamesMap.set(id, name);
+  if (
+    $("#link_url span")
+      .length > 0
+  ) {
+
+    const generalLanguage =
+      $(".divseason")
+        .text()
+        .trim() ||
+      "Latino";
+
+    const serverNamesMap =
+      new Map();
+
+    $(
+      ".TbVideoNv li, .VideoPlayer li"
+    ).each(
+      (_, liEl) => {
+
+        const li =
+          $(liEl);
+
+        const id =
+          li.attr("data-id") ||
+          li.attr("lid") ||
+          "";
+
+        const name =
+          li
+            .text()
+            .trim();
+
+        if (
+          id &&
+          name
+        ) {
+
+          serverNamesMap
+            .set(
+              id,
+              name
+            );
+        }
       }
-    });
+    );
 
-    $("#link_url span").each((_, spanEl) => {
-      const span = $(spanEl);
-      const lid = span.attr("lid") || "";
-      const embedUrl = span.attr("url") || "";
-      const name = serverNamesMap.get(lid) || "Desconocido";
+    $("#link_url span")
+      .each(
+        (_, spanEl) => {
 
-      if (embedUrl) {
-        let serverKey = name.toLowerCase().replace(/[^a-z0-9]/g, "");
-        if (serverKey.includes("streamwish") || embedUrl.includes("streamwish")) serverKey = "streamwish";
-        else if (serverKey.includes("voesx") || serverKey.includes("voe") || embedUrl.includes("voe.sx")) serverKey = "voesx";
-        else if (serverKey.includes("streamtape") || embedUrl.includes("streamtape")) serverKey = "streamtape";
-        else if (serverKey.includes("netu") || serverKey.includes("hqq") || embedUrl.includes("hqq") || embedUrl.includes("waaw") || embedUrl.includes("netu")) serverKey = "netu";
-        else if (serverKey.includes("vidhide") || embedUrl.includes("vidhide")) serverKey = "vidhide";
+          const span =
+            $(spanEl);
 
-        servers.push({
-          name: name,
-          server: serverKey,
-          language: generalLanguage,
-          embedUrl: embedUrl,
-        });
-      }
-    });
+          const lid =
+            span.attr("lid") ||
+            "";
+
+          const embedUrl =
+            span.attr("url") ||
+            "";
+
+          const name =
+            serverNamesMap
+              .get(lid) ||
+            "Desconocido";
+
+          if (embedUrl) {
+
+            let serverKey =
+              name
+                .toLowerCase()
+                .replace(
+                  /[^a-z0-9]/g,
+                  ""
+                );
+
+            if (
+              serverKey.includes(
+                "streamwish"
+              ) ||
+              embedUrl.includes(
+                "streamwish"
+              )
+            ) {
+
+              serverKey =
+                "streamwish";
+
+            } else if (
+              serverKey.includes(
+                "voesx"
+              ) ||
+              serverKey.includes(
+                "voe"
+              ) ||
+              embedUrl.includes(
+                "voe.sx"
+              )
+            ) {
+
+              serverKey =
+                "voesx";
+
+            } else if (
+              serverKey.includes(
+                "streamtape"
+              ) ||
+              embedUrl.includes(
+                "streamtape"
+              )
+            ) {
+
+              serverKey =
+                "streamtape";
+
+            } else if (
+              serverKey.includes(
+                "netu"
+              ) ||
+              serverKey.includes(
+                "hqq"
+              ) ||
+              embedUrl.includes(
+                "hqq"
+              ) ||
+              embedUrl.includes(
+                "waaw"
+              ) ||
+              embedUrl.includes(
+                "netu"
+              )
+            ) {
+
+              serverKey =
+                "netu";
+
+            } else if (
+              serverKey.includes(
+                "vidhide"
+              ) ||
+              embedUrl.includes(
+                "vidhide"
+              )
+            ) {
+
+              serverKey =
+                "vidhide";
+            }
+
+            servers.push({
+              name,
+              server:
+                serverKey,
+              language:
+                generalLanguage,
+              embedUrl,
+            });
+          }
+        }
+      );
   }
 
-  // Método 2: Estilo clásico con li.playurl (usado en películas)
-  if (servers.length === 0) {
-    $("li.playurl").each((_, el) => {
-      const element = $(el);
-      const embedUrl = element.attr("data-url") || "";
-      const language = element.attr("data-name") || "Subtitulado";
-      const name = element.find("a").text().trim() || element.text().trim() || "Desconocido";
+  // ===================================================
+  // MÉTODO 2
+  // Películas
+  // ===================================================
 
-      if (embedUrl) {
-        let serverKey = name.toLowerCase().replace(/[^a-z0-9]/g, "");
-        if (serverKey.includes("streamwish") || embedUrl.includes("streamwish")) serverKey = "streamwish";
-        else if (serverKey.includes("voesx") || serverKey.includes("voe") || embedUrl.includes("voe.sx")) serverKey = "voesx";
-        else if (serverKey.includes("streamtape") || embedUrl.includes("streamtape")) serverKey = "streamtape";
-        else if (serverKey.includes("netu") || serverKey.includes("hqq") || embedUrl.includes("hqq") || embedUrl.includes("waaw") || embedUrl.includes("netu")) serverKey = "netu";
-        else if (serverKey.includes("vidhide") || embedUrl.includes("vidhide")) serverKey = "vidhide";
+  if (
+    servers.length === 0
+  ) {
 
-        servers.push({
-          name: name,
-          server: serverKey,
-          language: language,
-          embedUrl: embedUrl,
-        });
-      }
-    });
+    $("li.playurl")
+      .each(
+        (_, el) => {
+
+          const element =
+            $(el);
+
+          const embedUrl =
+            element.attr(
+              "data-url"
+            ) ||
+            "";
+
+          const language =
+            element.attr(
+              "data-name"
+            ) ||
+            "Subtitulado";
+
+          const name =
+            element
+              .find("a")
+              .text()
+              .trim() ||
+            element
+              .text()
+              .trim() ||
+            "Desconocido";
+
+          if (embedUrl) {
+
+            let serverKey =
+              name
+                .toLowerCase()
+                .replace(
+                  /[^a-z0-9]/g,
+                  ""
+                );
+
+            if (
+              serverKey.includes(
+                "streamwish"
+              ) ||
+              embedUrl.includes(
+                "streamwish"
+              )
+            ) {
+
+              serverKey =
+                "streamwish";
+
+            } else if (
+              serverKey.includes(
+                "voesx"
+              ) ||
+              serverKey.includes(
+                "voe"
+              ) ||
+              embedUrl.includes(
+                "voe.sx"
+              )
+            ) {
+
+              serverKey =
+                "voesx";
+
+            } else if (
+              serverKey.includes(
+                "streamtape"
+              ) ||
+              embedUrl.includes(
+                "streamtape"
+              )
+            ) {
+
+              serverKey =
+                "streamtape";
+
+            } else if (
+              serverKey.includes(
+                "netu"
+              ) ||
+              serverKey.includes(
+                "hqq"
+              ) ||
+              embedUrl.includes(
+                "hqq"
+              ) ||
+              embedUrl.includes(
+                "waaw"
+              ) ||
+              embedUrl.includes(
+                "netu"
+              )
+            ) {
+
+              serverKey =
+                "netu";
+
+            } else if (
+              serverKey.includes(
+                "vidhide"
+              ) ||
+              embedUrl.includes(
+                "vidhide"
+              )
+            ) {
+
+              serverKey =
+                "vidhide";
+            }
+
+            servers.push({
+              name,
+              server:
+                serverKey,
+              language,
+              embedUrl,
+            });
+          }
+        }
+      );
   }
 
   return servers;
 }
 
 /**
- * Obtiene la lista completa de géneros disponibles
+ * Géneros
  */
 async function getGenres() {
-  const html = await fetchHtml(BASE_URL);
-  const $ = cheerio.load(html);
+
+  const html =
+    await fetchHtml(
+      BASE_URL
+    );
+
+  const $ =
+    cheerio.load(html);
+
   const genres = [];
 
-  $("a[href^='/generos/']").each((_, el) => {
-    const text = $(el).text().trim();
-    const slug = $(el).attr("href").split("/").pop();
-    if (text && !genres.some((g) => g.slug === slug)) {
-      genres.push({ name: text, slug });
-    }
-  });
+  $("a[href^='/generos/']")
+    .each(
+      (_, el) => {
 
-  // Fallback si no parseó nada de la home (por ej. si está detrás de un Cloudflare simple)
-  if (genres.length === 0) {
+        const text =
+          $(el)
+            .text()
+            .trim();
+
+        const href =
+          $(el)
+            .attr("href") ||
+          "";
+
+        const slug =
+          href
+            .split("/")
+            .pop();
+
+        if (
+          text &&
+          !genres.some(
+            (g) =>
+              g.slug ===
+              slug
+          )
+        ) {
+
+          genres.push({
+            name: text,
+            slug,
+          });
+        }
+      }
+    );
+
+  if (
+    genres.length === 0
+  ) {
+
     const staticGenres = [
-      { name: "Acción", slug: "accion" },
-      { name: "Animación", slug: "animacion" },
-      { name: "Aventura", slug: "aventura" },
-      { name: "Ciencia Ficción", slug: "ciencia-ficcion" },
-      { name: "Comedia", slug: "comedia" },
-      { name: "Drama", slug: "drama" },
-      { name: "Fantasía", slug: "fantasia" },
-      { name: "Romance", slug: "romance" },
-      { name: "Terror", slug: "terror" },
-      { name: "Suspenso", slug: "suspenso" },
-      { name: "Anime", slug: "anime" },
+      {
+        name: "Acción",
+        slug: "accion"
+      },
+      {
+        name: "Animación",
+        slug: "animacion"
+      },
+      {
+        name: "Aventura",
+        slug: "aventura"
+      },
+      {
+        name: "Ciencia Ficción",
+        slug: "ciencia-ficcion"
+      },
+      {
+        name: "Comedia",
+        slug: "comedia"
+      },
+      {
+        name: "Drama",
+        slug: "drama"
+      },
+      {
+        name: "Fantasía",
+        slug: "fantasia"
+      },
+      {
+        name: "Romance",
+        slug: "romance"
+      },
+      {
+        name: "Terror",
+        slug: "terror"
+      },
+      {
+        name: "Suspenso",
+        slug: "suspenso"
+      },
+      {
+        name: "Anime",
+        slug: "anime"
+      },
     ];
+
     return staticGenres;
   }
 
-  return genres.sort((a, b) => a.name.localeCompare(b.name));
+  return genres.sort(
+    (a, b) =>
+      a.name.localeCompare(
+        b.name
+      )
+  );
 }
 
 module.exports = {
