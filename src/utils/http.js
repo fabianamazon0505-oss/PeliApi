@@ -10,29 +10,107 @@ const DEFAULT_HEADERS = {
 
 const HTML_HEADERS = {
   "User-Agent": DEFAULT_HEADERS["User-Agent"],
-  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  Accept:
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
   "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+  "Accept-Encoding": "gzip, deflate, br",
+  "Cache-Control": "no-cache",
+  Pragma: "no-cache",
 };
 
 async function fetchHtml(url, customHeaders = {}) {
   try {
-    const timeout = Number(process.env.REQUEST_TIMEOUT_MS || 15000);
+    const timeout = Number(
+      process.env.REQUEST_TIMEOUT_MS || 15000
+    );
+
+    console.log(`[HTTP] GET ${url}`);
+
     const response = await axios.get(url, {
       timeout,
-      headers: { ...HTML_HEADERS, ...customHeaders },
+      headers: {
+        ...HTML_HEADERS,
+        ...customHeaders,
+        Referer: "https://pelisplushd.to/",
+      },
       maxRedirects: 5,
-      validateStatus: (status) => status >= 200 && status < 400,
+      validateStatus: (status) =>
+        status >= 200 && status < 400,
     });
+
+    console.log(
+      `[HTTP] OK ${response.status} ${url} | bytes=${String(
+        response.data
+      ).length}`
+    );
+
     return response.data;
   } catch (error) {
-    throw new ApiError(500, `No se pudo obtener el contenido desde ${url}`, error.message);
+    console.error(`[HTTP] ERROR ${url}`);
+    console.error(
+      `[HTTP] message: ${error.message}`
+    );
+
+    if (error.response) {
+      console.error(
+        `[HTTP] status: ${error.response.status}`
+      );
+
+      console.error(
+        `[HTTP] headers: ${JSON.stringify(
+          error.response.headers
+        )}`
+      );
+
+      let body = "";
+
+      try {
+        body =
+          typeof error.response.data === "string"
+            ? error.response.data.substring(0, 500)
+            : JSON.stringify(
+                error.response.data
+              ).substring(0, 500);
+      } catch (_e) {
+        body = "No se pudo leer el body";
+      }
+
+      console.error(`[HTTP] body: ${body}`);
+    } else {
+      console.error(
+        "[HTTP] Sin respuesta HTTP del servidor"
+      );
+
+      if (error.code) {
+        console.error(
+          `[HTTP] code: ${error.code}`
+        );
+      }
+    }
+
+    throw new ApiError(
+      500,
+      `No se pudo obtener el contenido desde ${url}`,
+      error.message
+    );
   }
 }
 
-async function fetchHtmlWithHeaders(url, referer, customHeaders = {}) {
+async function fetchHtmlWithHeaders(
+  url,
+  referer,
+  customHeaders = {}
+) {
   try {
-    const timeout = Number(process.env.REQUEST_TIMEOUT_MS || 15000);
-    const headers = { ...HTML_HEADERS, ...customHeaders };
+    const timeout = Number(
+      process.env.REQUEST_TIMEOUT_MS || 15000
+    );
+
+    const headers = {
+      ...HTML_HEADERS,
+      ...customHeaders,
+    };
+
     if (referer) {
       headers.Referer = referer;
     }
@@ -41,17 +119,36 @@ async function fetchHtmlWithHeaders(url, referer, customHeaders = {}) {
       timeout,
       headers,
       maxRedirects: 5,
-      validateStatus: (status) => status >= 200 && status < 400,
+      validateStatus: (status) =>
+        status >= 200 && status < 400,
     });
 
-    return { html: response.data, headers: response.headers };
+    return {
+      html: response.data,
+      headers: response.headers,
+    };
   } catch (error) {
-    throw new ApiError(500, `Error de red al consultar ${url}`, error.message);
+    console.error(
+      `[HTTP] ERROR ${url}: ${error.message}`
+    );
+
+    if (error.response) {
+      console.error(
+        `[HTTP] status: ${error.response.status}`
+      );
+    }
+
+    throw new ApiError(
+      500,
+      `Error de red al consultar ${url}`,
+      error.message
+    );
   }
 }
 
 function resolveAbsoluteUrl(base, relative) {
   if (!relative) return "";
+
   try {
     return new URL(relative, base).href;
   } catch (_e) {
@@ -81,12 +178,16 @@ function decodeIfEncoded(url) {
   }
 
   try {
-    if (url.includes("%") && url.match(/%[0-9A-Fa-f]{2}/)) {
+    if (
+      url.includes("%") &&
+      url.match(/%[0-9A-Fa-f]{2}/)
+    ) {
       return decodeURIComponent(url);
     }
   } catch (_e) {
-    // Ignore decode errors
+    // Ignorar errores de decode
   }
+
   return url;
 }
 
@@ -96,6 +197,7 @@ function isLikelyVideoUrl(url) {
   }
 
   const lower = url.toLowerCase();
+
   const excludePatterns = [
     "cloudflareinsights",
     "google-analytics",
@@ -134,21 +236,31 @@ function findFirstUrl(payload, patterns) {
   for (const pattern of patterns) {
     try {
       const match = payload.match(pattern);
+
       if (match && match[1]) {
-        const candidate = normalizeExtractedUrl(match[1]);
-        if (candidate && isLikelyVideoUrl(candidate)) {
+        const candidate =
+          normalizeExtractedUrl(match[1]);
+
+        if (
+          candidate &&
+          isLikelyVideoUrl(candidate)
+        ) {
           return decodeIfEncoded(candidate);
         }
       }
     } catch (_e) {
-      // Skip invalid patterns silently
+      // Ignorar patrones inválidos
     }
   }
 
-  // Fallback: try to find any URL-like pattern with .m3u8 or .mp4
-  const urlMatch = payload.match(/(https?:\/\/[^\s"'<>]+\.(?:m3u8|mp4)[^\s"'<>]*)/i);
+  const urlMatch = payload.match(
+    /(https?:\/\/[^\s"'<>]+\.(?:m3u8|mp4)[^\s"'<>]*)/i
+  );
+
   if (urlMatch && urlMatch[1]) {
-    const candidate = normalizeExtractedUrl(urlMatch[1]);
+    const candidate =
+      normalizeExtractedUrl(urlMatch[1]);
+
     if (isLikelyVideoUrl(candidate)) {
       return decodeIfEncoded(candidate);
     }
