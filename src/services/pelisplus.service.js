@@ -4,7 +4,7 @@ const { ApiError } = require("../utils/api-error");
 
 const BASE_URL =
   process.env.PELISPLUS_DOMAIN ||
-  "https://www.pelisplushd.la";
+  ""https://pelisplushd.to";
 
 const PUBLIC_BASE_URL =
   process.env.PUBLIC_BASE_URL ||
